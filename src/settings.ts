@@ -6,6 +6,12 @@ import {
   errMsg, pollForToken, startDeviceFlow,
 } from "./google";
 import { createConnectionCode, readConnectionCode } from "./crypto";
+import {
+  BackupPlan, DownloadPlan, MAX_SIMPLE_UPLOAD, LocalFile,
+  describeBackup, describeDownload, describeResult, planBackup, planDownload,
+} from "./plan";
+import { executeBackup, executeDownload, scanLocal } from "./transfer";
+import { RemoteEntry } from "./types";
 
 export class DriveSyncSettingTab extends PluginSettingTab {
   plugin: DriveVaultSyncPlugin;
@@ -15,6 +21,9 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   private flow: FlowControl | null = null;
   private passphrase = "";
   private connectCode = "";
+  private busy = false;
+  private reportEl!: HTMLElement;
+  private actionEl!: HTMLElement;
 
   constructor(app: App, plugin: DriveVaultSyncPlugin) {
     super(app, plugin);
@@ -171,6 +180,22 @@ export class DriveSyncSettingTab extends PluginSettingTab {
       .setDesc("Checks that Google Drive and the folder are reachable.")
       .addButton((b) => b.setButtonText("Test").onClick(() => this.testConnection()));
 
+    new Setting(el).setName("Back up and download").setHeading();
+    el.createEl("p", {
+      cls: "dvs-status",
+      text: "Scan first, read the summary, then start. Nothing on this device or on Drive is ever deleted or overwritten.",
+    });
+    new Setting(el)
+      .setName("Back up this vault to Drive")
+      .setDesc("Uploads files that are not on Drive yet. Use this on your main device first.")
+      .addButton((b) => b.setButtonText("Scan").onClick(() => this.scanBackup()));
+    new Setting(el)
+      .setName("Download from Drive into this vault")
+      .setDesc("Downloads files that are not here yet. Use this on a new device. Start with an empty vault.")
+      .addButton((b) => b.setButtonText("Scan").onClick(() => this.scanDownload()));
+    this.reportEl = el.createDiv({ cls: "dvs-report" });
+    this.actionEl = el.createDiv();
+
     new Setting(el).setName("Add another device").setHeading();
     new Setting(el)
       .setName("Passphrase for the code")
@@ -209,6 +234,93 @@ export class DriveSyncSettingTab extends PluginSettingTab {
           this.display();
         })
       );
+  }
+
+  // ---------- Backup and download ----------
+  private resetReport() {
+    this.reportEl.setText("");
+    this.actionEl.empty();
+  }
+
+  private showStart(label: string, run: () => Promise<void>) {
+    this.actionEl.empty();
+    new Setting(this.actionEl).addButton((b) =>
+      b.setButtonText(label).setCta().onClick(async () => {
+        if (this.busy) return;
+        this.busy = true;
+        this.actionEl.empty();
+        try {
+          await run();
+        } catch (e) {
+          this.setStatus(errMsg(e));
+        } finally {
+          this.busy = false;
+        }
+      })
+    );
+  }
+
+  private async scanBackup() {
+    const c = this.plugin.data.credentials;
+    if (!c || this.busy) return;
+    this.busy = true;
+    this.resetReport();
+    try {
+      const drive = new DriveClient(new DriveAuth(c));
+      this.setStatus("Reading Drive…");
+      const { entries, problems } = await drive.listTree(c.folderId);
+      const local = await scanLocal(this.app, (m) => this.setStatus(m));
+      const plan = planBackup(local.files, local.folders, entries, MAX_SIMPLE_UPLOAD);
+      this.reportEl.setText(describeBackup(plan, problems));
+      if (plan.upload.length + plan.foldersToCreate.length === 0) {
+        this.setStatus("Scan finished. Nothing needs to be uploaded.");
+      } else {
+        this.setStatus("Scan finished. Read the summary, then start. Start soon, because the scan is a snapshot.");
+        this.showStart("Start backup", () => this.runBackup(drive, c.folderId, plan, entries));
+      }
+    } catch (e) {
+      this.setStatus(errMsg(e));
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async runBackup(drive: DriveClient, rootId: string, plan: BackupPlan, remote: Map<string, RemoteEntry>) {
+    const res = await executeBackup(this.app, drive, rootId, plan, remote, (m) => this.setStatus(m));
+    this.reportEl.setText(describeResult("BACKUP RESULT", res.done, res.verified, res.failed, res.notes));
+    this.setStatus(res.failed.length ? "Backup finished with problems. See the result below." : "Backup finished and verified.");
+  }
+
+  private async scanDownload() {
+    const c = this.plugin.data.credentials;
+    if (!c || this.busy) return;
+    this.busy = true;
+    this.resetReport();
+    try {
+      const drive = new DriveClient(new DriveAuth(c));
+      this.setStatus("Reading Drive…");
+      const { entries, problems } = await drive.listTree(c.folderId);
+      const local = await scanLocal(this.app, (m) => this.setStatus(m));
+      const localFiles = new Map<string, LocalFile>(local.files.map((f) => [f.path, f]));
+      const plan = planDownload(localFiles, new Set(local.folders), entries);
+      this.reportEl.setText(describeDownload(plan, problems));
+      if (plan.download.length + plan.foldersToCreate.length === 0) {
+        this.setStatus("Scan finished. Nothing needs to be downloaded.");
+      } else {
+        this.setStatus("Scan finished. Read the summary, then start.");
+        this.showStart("Start download", () => this.runDownload(drive, plan));
+      }
+    } catch (e) {
+      this.setStatus(errMsg(e));
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async runDownload(drive: DriveClient, plan: DownloadPlan) {
+    const res = await executeDownload(this.app, drive, plan, (m) => this.setStatus(m));
+    this.reportEl.setText(describeResult("DOWNLOAD RESULT", res.done, res.verified, res.failed, res.notes));
+    this.setStatus(res.failed.length ? "Download finished with problems. See the result below." : "Download finished and verified.");
   }
 
   private async testConnection() {

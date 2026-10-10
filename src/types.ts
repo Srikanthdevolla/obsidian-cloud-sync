@@ -23,3 +23,20 @@ export function defaultData(): PluginData {
     draft: { clientId: "", clientSecret: "", folderName: "" },
   };
 }
+
+export interface RemoteEntry {
+  id: string;
+  path: string;
+  name: string;
+  isFolder: boolean;
+  native: boolean; // Google Docs/Sheets etc. (cannot be downloaded as a normal file)
+  size: number;
+  sha256: string | null; // set by this plugin at upload time
+}
+
+export interface RunResult {
+  done: number;
+  failed: { path: string; error: string }[];
+  verified: number;
+  notes: string[];
+}
