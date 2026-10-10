@@ -1,0 +1,9 @@
+{
+  "id": "drive-vault-sync",
+  "name": "Drive Vault Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Sync your vault with your own Google Drive using one encrypted connection code.",
+  "author": "Me",
+  "isDesktopOnly": false
+}

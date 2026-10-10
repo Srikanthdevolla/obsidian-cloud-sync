@@ -1,0 +1,4 @@
+.dvs-code { width: 100%; font-family: var(--font-monospace); font-size: 12px; }
+.dvs-status { margin: 12px 0; color: var(--text-muted); white-space: pre-wrap; }
+.dvs-device { margin: 8px 0 16px; padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; }
+.dvs-user-code { font-size: 28px; letter-spacing: 4px; font-weight: 600; margin: 8px 0; }
