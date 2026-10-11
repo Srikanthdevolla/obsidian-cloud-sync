@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, ToggleComponent } from "obsidian";
 import type DriveVaultSyncPlugin from "./main";
 import { Credentials } from "./types";
 import {
@@ -20,6 +20,9 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   private codeBox: HTMLTextAreaElement | null = null;
   private flow: FlowControl | null = null;
   private inlineEl: HTMLElement | null = null;
+  private syncStatusEl: HTMLElement | null = null;
+  private enableEl!: HTMLElement;
+  private autoToggle: ToggleComponent | null = null;
   private connectCodeEl: HTMLTextAreaElement | null = null;
   private connectPassEl: HTMLInputElement | null = null;
   private createPassEl: HTMLInputElement | null = null;
@@ -34,6 +37,7 @@ export class DriveSyncSettingTab extends PluginSettingTab {
 
   hide(): void {
     if (this.flow) this.flow.cancelled = true;
+    this.plugin.onStatusChange = null;
   }
 
   display(): void {
@@ -195,7 +199,45 @@ export class DriveSyncSettingTab extends PluginSettingTab {
       .setDesc("Checks that Google Drive and the folder are reachable.")
       .addButton((b) => b.setButtonText("Test").onClick(() => this.testConnection()));
 
-    new Setting(el).setName("Back up and download").setHeading();
+    new Setting(el).setName("Automatic sync").setHeading();
+    new Setting(el)
+      .setName("Sync automatically while Obsidian is open")
+      .setDesc("Uploads your edits and applies other devices' changes in the background. Everything is stored inside your Drive vault folder only.")
+      .addToggle((t) => {
+        this.autoToggle = t;
+        t.setValue(this.plugin.data.autoSync).onChange((v) => this.toggleAuto(v));
+      });
+    new Setting(el)
+      .setName("This device's name")
+      .setDesc("Appears in the names of conflict copies, for example: note (conflict Laptop 2026-10-11 0818).md")
+      .addText((t) =>
+        t.setValue(this.plugin.data.deviceName).onChange(async (v) => {
+          this.plugin.data.deviceName = v.trim() || this.plugin.data.deviceName;
+          this.plugin.engine = null; // pick up the new name
+          await this.plugin.savePluginData();
+        })
+      );
+    this.syncStatusEl = el.createDiv({ cls: "dvs-status" });
+    this.enableEl = el.createDiv();
+    this.plugin.onStatusChange = () => this.refreshSyncStatus();
+    this.refreshSyncStatus();
+    new Setting(el)
+      .setName("Diagnostics")
+      .setDesc("The log contains file names and results only, never note contents.")
+      .addButton((b) => b.setButtonText("Sync now").onClick(() => void this.plugin.syncNow()))
+      .addButton((b) =>
+        b.setButtonText("Copy log").onClick(async () => {
+          const log = this.plugin.engine ? this.plugin.engine.getLog() : "";
+          try {
+            await navigator.clipboard.writeText(log || "(empty)");
+            this.setStatus("Log copied.");
+          } catch {
+            this.setStatus(log || "The log is empty.");
+          }
+        })
+      );
+
+    new Setting(el).setName("Manual tools (not needed once automatic sync is on)").setHeading();
     el.createEl("p", {
       cls: "dvs-status",
       text: "Scan first, read the summary, then start. Nothing on this device or on Drive is ever deleted or overwritten.",
@@ -254,6 +296,70 @@ export class DriveSyncSettingTab extends PluginSettingTab {
       );
   }
 
+  private refreshSyncStatus() {
+    const el = this.syncStatusEl;
+    if (!el || !el.isConnected) return;
+    if (!this.plugin.data.autoSync) {
+      el.setText("Automatic sync is off.");
+      return;
+    }
+    const st = this.plugin.status;
+    const lines = [st.message];
+    if (st.lastSuccess) lines.push(`Last successful check: ${new Date(st.lastSuccess).toLocaleTimeString()}`);
+    if (st.last) {
+      const l = st.last;
+      lines.push(`Last run: ${l.up} uploaded, ${l.down} downloaded, ${l.del} deleted, ${l.conflicts} conflict(s), ${l.skipped} skipped, ${l.errors} error(s)`);
+    }
+    el.setText(lines.join("\n"));
+  }
+
+  private async toggleAuto(on: boolean) {
+    this.enableEl.empty();
+    this.reportEl.setText("");
+    if (!on) {
+      await this.plugin.setAutoSync(false);
+      this.refreshSyncStatus();
+      return;
+    }
+    try {
+      this.setStatus("Checking Drive and this vault…");
+      const engine = await this.plugin.ensureEngine();
+      if (!engine) throw new Error("This device is not connected.");
+      if (engine.isInitialized()) {
+        await this.plugin.setAutoSync(true);
+        this.setStatus("Automatic sync is on.");
+        this.refreshSyncStatus();
+        return;
+      }
+      const { text } = await engine.preview();
+      this.reportEl.setText(text);
+      this.setStatus("Read the preview, then confirm to start automatic sync.");
+      new Setting(this.enableEl)
+        .setName("Start automatic sync with this plan?")
+        .addButton((b) =>
+          b.setButtonText("Yes, start").setCta().onClick(async () => {
+            await engine.markInitialized();
+            await this.plugin.setAutoSync(true);
+            this.enableEl.empty();
+            this.reportEl.setText("");
+            this.setStatus("Automatic sync is on.");
+            this.refreshSyncStatus();
+          })
+        )
+        .addButton((b) =>
+          b.setButtonText("Cancel").onClick(() => {
+            this.autoToggle?.setValue(false);
+            this.enableEl.empty();
+            this.reportEl.setText("");
+            this.setStatus("Cancelled. Automatic sync is off.");
+          })
+        );
+    } catch (e) {
+      this.autoToggle?.setValue(false);
+      this.setStatus(errMsg(e));
+    }
+  }
+
   // ---------- Backup and download ----------
   private resetReport() {
     this.reportEl.setText("");
@@ -281,6 +387,7 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   private async scanBackup() {
     const c = this.plugin.data.credentials;
     if (!c || this.busy) return;
+    if (this.plugin.data.autoSync) return this.setStatus("Turn off automatic sync first if you want to use the manual tools.");
     this.busy = true;
     this.resetReport();
     try {
@@ -312,6 +419,7 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   private async scanDownload() {
     const c = this.plugin.data.credentials;
     if (!c || this.busy) return;
+    if (this.plugin.data.autoSync) return this.setStatus("Turn off automatic sync first if you want to use the manual tools.");
     this.busy = true;
     this.resetReport();
     try {

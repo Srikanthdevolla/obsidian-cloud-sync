@@ -136,6 +136,8 @@ function escapeQ(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+export interface ChangeInfo { id: string; removed: boolean; trashed: boolean; folder: boolean; sha256: string | null }
+
 export interface DriveFolder { id: string; name: string; trashed?: boolean }
 
 interface RawFile {
@@ -169,7 +171,7 @@ export class DriveClient {
   }
 
   private async call(method: string, path: string, query?: Record<string, string>, body?: unknown): Promise<any> {
-    const url = DRIVE_URL + path + (query ? "?" + new URLSearchParams(query).toString() : "");
+    const url = DRIVE_URL + path + (query && Object.keys(query).length ? "?" + new URLSearchParams(query).toString() : "");
     const res = await this.request({
       url,
       method,
@@ -266,12 +268,11 @@ export class DriveClient {
     return { entries, problems };
   }
 
-  async uploadFile(parentId: string, name: string, data: ArrayBuffer, sha256: string): Promise<{ id: string }> {
+  private multipart(meta: unknown, data: ArrayBuffer): { body: ArrayBuffer; contentType: string } {
     const boundary = "dvs" + Math.random().toString(36).slice(2) + Date.now().toString(36);
     const enc = new TextEncoder();
-    const meta = JSON.stringify({ name, parents: [parentId], appProperties: { sha256 } });
     const head = enc.encode(
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
       `--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`
     );
     const tail = enc.encode(`\r\n--${boundary}--`);
@@ -279,17 +280,71 @@ export class DriveClient {
     body.set(head, 0);
     body.set(new Uint8Array(data), head.length);
     body.set(tail, head.length + data.byteLength);
+    return { body: body.buffer as ArrayBuffer, contentType: `multipart/related; boundary=${boundary}` };
+  }
+
+  async uploadFile(parentId: string, name: string, data: ArrayBuffer, sha256: string): Promise<{ id: string }> {
+    const mp = this.multipart({ name, parents: [parentId], appProperties: { sha256 } }, data);
     const res = await this.request({
       url: `${UPLOAD_URL}?uploadType=multipart&fields=id`,
       method: "POST",
-      contentType: `multipart/related; boundary=${boundary}`,
-      body: body.buffer as ArrayBuffer,
+      contentType: mp.contentType,
+      body: mp.body,
     });
     if (res.status >= 400) {
       const j = jsonOf(res);
       throw new Error(`Upload failed (${res.status}): ${j.error?.message ?? "unknown"}`);
     }
     return jsonOf(res) as { id: string };
+  }
+
+  async updateFile(id: string, data: ArrayBuffer, sha256: string): Promise<void> {
+    const mp = this.multipart({ appProperties: { sha256 } }, data);
+    const res = await this.request({
+      url: `${UPLOAD_URL}/${encodeURIComponent(id)}?uploadType=multipart&fields=id`,
+      method: "PATCH",
+      contentType: mp.contentType,
+      body: mp.body,
+    });
+    if (res.status >= 400) {
+      const j = jsonOf(res);
+      throw new Error(`Update failed (${res.status}): ${j.error?.message ?? "unknown"}`);
+    }
+  }
+
+  // Moves to the Drive trash (recoverable for 30 days). Never permanently deletes.
+  async trash(id: string): Promise<void> {
+    await this.call("PATCH", "/files/" + encodeURIComponent(id), { fields: "id" }, { trashed: true });
+  }
+
+  async getStartPageToken(): Promise<string> {
+    const j = await this.call("GET", "/changes/startPageToken", {});
+    return j.startPageToken as string;
+  }
+
+  async listChanges(token: string): Promise<{ changes: ChangeInfo[]; newToken: string }> {
+    const out: ChangeInfo[] = [];
+    let page = token;
+    let newToken = token;
+    do {
+      const j = await this.call("GET", "/changes", {
+        pageToken: page,
+        pageSize: "1000",
+        fields: "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,mimeType,trashed,appProperties))",
+      });
+      for (const c of j.changes ?? []) {
+        out.push({
+          id: c.fileId,
+          removed: !!c.removed,
+          trashed: !!c.file?.trashed,
+          folder: c.file?.mimeType === FOLDER_MIME,
+          sha256: c.file?.appProperties?.sha256 ?? null,
+        });
+      }
+      if (j.newStartPageToken) newToken = j.newStartPageToken;
+      page = j.nextPageToken ?? "";
+    } while (page);
+    return { changes: out, newToken };
   }
 
   async download(fileId: string): Promise<ArrayBuffer> {

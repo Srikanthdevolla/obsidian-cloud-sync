@@ -22,7 +22,7 @@ export async function scanLocal(app: App, progress: Progress): Promise<{ files: 
   return { files, folders };
 }
 
-async function ensureLocalFolder(app: App, path: string): Promise<void> {
+export async function ensureLocalFolder(app: App, path: string): Promise<void> {
   if (!path) return;
   let cur = "";
   for (const part of path.split("/")) {
@@ -31,7 +31,7 @@ async function ensureLocalFolder(app: App, path: string): Promise<void> {
   }
 }
 
-async function ensureRemoteFolder(drive: DriveClient, ids: Map<string, string>, path: string): Promise<string> {
+export async function ensureRemoteFolder(drive: DriveClient, ids: Map<string, string>, path: string): Promise<string> {
   const known = ids.get(path);
   if (known !== undefined) return known;
   const parentId = await ensureRemoteFolder(drive, ids, dirname(path));

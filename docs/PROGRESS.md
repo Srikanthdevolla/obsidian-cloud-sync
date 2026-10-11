@@ -17,3 +17,11 @@
 - Connection code format DVS2 (integrity check separates "incomplete code" from "wrong passphrase"); old DVS1 codes still open.
 - Settings read the code/passphrase fields at click time (no stale state), Show/hide passphrase, self-test when a code is created, result shown next to the buttons.
 - Next: confirm second-device download scan lists the files; then Step C (automatic sync).
+
+## v0.3.0: automatic sync (Step C)
+- Background two-way sync while Obsidian is open: timer (30 s desktop / 60 s mobile), local edits (5 s debounce), app resume, back online.
+- Drive change feed = cheap "anything new?" check; full comparison on change, on first run, and every 10 min as a safety net.
+- Three-way comparison against the last-synced state. Drive version keeps the name in a conflict; local version is kept as "(conflict <device> <time>)". Edit beats delete. Deletes go to trash (Drive trash / Obsidian .trash).
+- Everything lives inside the one Drive vault folder, mirroring the vault's folders.
+- Tested against a simulated Drive with 3 devices (conflicts, deletes, folders, crash recovery, offline, hostile names, corrupted downloads). Real Drive still to be confirmed (esp. change feed with drive.file).
+- Not yet: files over 5 MB (resumable upload), rename detection (a rename syncs as delete + create), E2E encryption, publishing the Google app (7-day key expiry).
