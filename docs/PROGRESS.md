@@ -12,3 +12,8 @@
 - Files over 5 MB are skipped for now (resumable upload comes later). Hidden/unsafe/Google-Docs items are skipped.
 - Tested against a simulated Drive only; real Drive behaviour (esp. drive.file visibility across devices) still to confirm.
 - Next: Step C (automatic two-way sync, change feed, conflict copies).
+
+## v0.2.1
+- Connection code format DVS2 (integrity check separates "incomplete code" from "wrong passphrase"); old DVS1 codes still open.
+- Settings read the code/passphrase fields at click time (no stale state), Show/hide passphrase, self-test when a code is created, result shown next to the buttons.
+- Next: confirm second-device download scan lists the files; then Step C (automatic sync).

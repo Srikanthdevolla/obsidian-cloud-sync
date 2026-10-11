@@ -1,6 +1,7 @@
 import { Credentials } from "./types";
 
-const PREFIX = "DVS1.";
+const PREFIX_V1 = "DVS1.";
+const PREFIX_V2 = "DVS2.";
 const ITERATIONS = 600000;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -39,6 +40,26 @@ async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKe
   );
 }
 
+async function checksum4(bytes: Uint8Array): Promise<Uint8Array> {
+  const d = new Uint8Array(await requireCrypto().digest("SHA-256", bytes));
+  return d.slice(0, 4);
+}
+
+// Removes spaces, line breaks, invisible characters and quote marks that
+// messaging apps and phone keyboards sometimes add around a pasted code.
+export function cleanCode(raw: string): string {
+  return raw
+    .replace(/[\s\u200b-\u200f\u2060\ufeff]+/g, "")
+    .replace(/^[`"'“”‘’<(\[]+/, "")
+    .replace(/[`"'“”‘’>)\]]+$/, "");
+}
+
+export function describeCode(raw: string): string {
+  const c = cleanCode(raw);
+  if (!c) return "No code pasted.";
+  return `Code length ${c.length}, starts "${c.slice(0, 5)}", ends "…${c.slice(-6)}". Compare these with the first device.`;
+}
+
 export async function createConnectionCode(cred: Credentials, passphrase: string): Promise<string> {
   const subtle = requireCrypto();
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -46,35 +67,76 @@ export async function createConnectionCode(cred: Credentials, passphrase: string
   const key = await deriveKey(passphrase, salt);
   const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(cred))));
   const packed = new Uint8Array(1 + 16 + 12 + ct.length);
-  packed[0] = 1; // format version
+  packed[0] = 2; // format version 2: ends with a 4-byte integrity check
   packed.set(salt, 1);
   packed.set(iv, 17);
   packed.set(ct, 29);
-  return PREFIX + toB64(packed);
+  const sum = await checksum4(packed);
+  const full = new Uint8Array(packed.length + 4);
+  full.set(packed, 0);
+  full.set(sum, packed.length);
+  return PREFIX_V2 + toB64(full);
+}
+
+function passphraseVariants(p: string): string[] {
+  const list = [p, p.trim(), p.normalize("NFKC").trim()];
+  return list.filter((v, i) => v.length > 0 && list.indexOf(v) === i);
 }
 
 export async function readConnectionCode(code: string, passphrase: string): Promise<Credentials> {
   const subtle = requireCrypto();
-  const clean = code.replace(/\s+/g, "");
-  if (!clean.startsWith(PREFIX)) throw new Error("This is not a valid connection code.");
+  const clean = cleanCode(code);
+  if (!clean) throw new Error("Paste the connection code first.");
+  if (!passphrase) throw new Error("Type the passphrase first.");
+
+  const v2 = clean.startsWith(PREFIX_V2);
+  if (!v2 && !clean.startsWith(PREFIX_V1)) {
+    throw new Error(`This does not look like a connection code. It should start with DVS2. (you pasted something starting "${clean.slice(0, 6)}").`);
+  }
+
   let packed: Uint8Array;
   try {
-    packed = fromB64(clean.slice(PREFIX.length));
+    packed = fromB64(clean.slice(5));
   } catch {
-    throw new Error("This connection code is damaged. Copy it again.");
+    throw new Error("The code is incomplete or has characters that were changed while copying. This is NOT a passphrase problem. Copy the whole code again from the first device.");
   }
-  if (packed.length < 30 || packed[0] !== 1) throw new Error("This connection code is damaged or from a newer version.");
+
+  if (v2) {
+    if (packed.length < 34) throw new Error("The code is incomplete. Copy the whole code again.");
+    const body = packed.slice(0, packed.length - 4);
+    const given = packed.slice(packed.length - 4);
+    const expected = await checksum4(body);
+    for (let i = 0; i < 4; i++) {
+      if (given[i] !== expected[i]) {
+        throw new Error("The code is incomplete or was changed while copying (the integrity check failed). This is NOT a passphrase problem. Copy the code again from the first device.");
+      }
+    }
+    packed = body;
+  }
+  if (packed.length < 30 || packed[0] !== (v2 ? 2 : 1)) {
+    throw new Error("This connection code is damaged or from a newer version.");
+  }
 
   const salt = packed.slice(1, 17);
   const iv = packed.slice(17, 29);
   const ct = packed.slice(29);
-  const key = await deriveKey(passphrase, salt);
 
-  let text: string;
-  try {
-    text = dec.decode(await subtle.decrypt({ name: "AES-GCM", iv }, key, ct));
-  } catch {
-    throw new Error("Wrong passphrase, or the code was changed.");
+  let text: string | null = null;
+  for (const candidate of passphraseVariants(passphrase)) {
+    const key = await deriveKey(candidate, salt);
+    try {
+      text = dec.decode(await subtle.decrypt({ name: "AES-GCM", iv }, key, ct));
+      break;
+    } catch {
+      // try the next variant (for example without stray spaces)
+    }
+  }
+  if (text === null) {
+    throw new Error(
+      v2
+        ? "The code is complete, but the passphrase is wrong. Check capital letters, spaces and the exact words. Use the Show button to read what you typed."
+        : "Wrong passphrase, or this older-format code is incomplete. Create a new code on the first device (it will start with DVS2.) and try again."
+    );
   }
 
   const c = JSON.parse(text) as Credentials;

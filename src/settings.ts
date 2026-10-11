@@ -5,7 +5,7 @@ import {
   DeviceCode, DriveAuth, DriveClient, FlowControl,
   errMsg, pollForToken, startDeviceFlow,
 } from "./google";
-import { createConnectionCode, readConnectionCode } from "./crypto";
+import { createConnectionCode, describeCode, readConnectionCode } from "./crypto";
 import {
   BackupPlan, DownloadPlan, MAX_SIMPLE_UPLOAD, LocalFile,
   describeBackup, describeDownload, describeResult, planBackup, planDownload,
@@ -19,8 +19,10 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   private deviceEl!: HTMLElement;
   private codeBox: HTMLTextAreaElement | null = null;
   private flow: FlowControl | null = null;
-  private passphrase = "";
-  private connectCode = "";
+  private inlineEl: HTMLElement | null = null;
+  private connectCodeEl: HTMLTextAreaElement | null = null;
+  private connectPassEl: HTMLInputElement | null = null;
+  private createPassEl: HTMLInputElement | null = null;
   private busy = false;
   private reportEl!: HTMLElement;
   private actionEl!: HTMLElement;
@@ -45,6 +47,15 @@ export class DriveSyncSettingTab extends PluginSettingTab {
 
   private setStatus(text: string) {
     this.statusEl.setText(text);
+    if (this.inlineEl && this.inlineEl.isConnected) this.inlineEl.setText(text);
+  }
+
+  private addShowToggle(setting: Setting, input: HTMLInputElement) {
+    setting.addExtraButton((b) =>
+      b.setIcon("eye").setTooltip("Show or hide what you typed").onClick(() => {
+        input.type = input.type === "password" ? "text" : "password";
+      })
+    );
   }
 
   // ---------- Not connected ----------
@@ -84,16 +95,20 @@ export class DriveSyncSettingTab extends PluginSettingTab {
 
     new Setting(el).setName("Another device: use a connection code").setHeading();
     new Setting(el).setName("Connection code").addTextArea((t) => {
-      t.setPlaceholder("DVS1.…").onChange((v) => (this.connectCode = v));
+      t.setPlaceholder("DVS2.…");
       t.inputEl.rows = 4;
+      this.connectCodeEl = t.inputEl;
     });
-    new Setting(el).setName("Passphrase").addText((t) => {
+    const passSetting = new Setting(el).setName("Passphrase").addText((t) => {
       t.inputEl.type = "password";
-      t.onChange((v) => (this.passphrase = v));
+      t.inputEl.autocomplete = "off";
+      this.connectPassEl = t.inputEl;
     });
+    this.addShowToggle(passSetting, this.connectPassEl as unknown as HTMLInputElement);
     new Setting(el).addButton((b) =>
       b.setButtonText("Connect this device").setCta().onClick(() => this.connectWithCode())
     );
+    this.inlineEl = el.createDiv({ cls: "dvs-status" });
   }
 
   private showCode(dc: DeviceCode) {
@@ -150,20 +165,20 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   }
 
   private async connectWithCode() {
+    const code = this.connectCodeEl ? this.connectCodeEl.value : "";
+    const pass = this.connectPassEl ? this.connectPassEl.value : "";
     try {
-      this.setStatus("Unlocking the code… this takes a few seconds.");
-      const cred = await readConnectionCode(this.connectCode, this.passphrase);
+      this.setStatus(`Unlocking the code… this can take up to a minute on a phone. ${describeCode(code)}`);
+      const cred = await readConnectionCode(code, pass);
       this.setStatus("Checking access to your Drive folder…");
       const drive = new DriveClient(new DriveAuth(cred));
       const folder = await drive.getFolder(cred.folderId);
       if (folder.trashed) throw new Error("That Drive folder is in the trash. Restore it in Google Drive and try again.");
       await this.plugin.connect(cred);
-      this.connectCode = "";
-      this.passphrase = "";
       this.display();
       this.setStatus(`Connected. Found Drive folder "${folder.name}".`);
     } catch (e) {
-      this.setStatus(errMsg(e));
+      this.setStatus(`${errMsg(e)}\n${describeCode(code)}`);
     }
   }
 
@@ -197,16 +212,19 @@ export class DriveSyncSettingTab extends PluginSettingTab {
     this.actionEl = el.createDiv();
 
     new Setting(el).setName("Add another device").setHeading();
-    new Setting(el)
+    const mk = new Setting(el)
       .setName("Passphrase for the code")
       .setDesc("At least 12 characters. Use 4 or more random words. You type it on each new device.")
       .addText((t) => {
         t.inputEl.type = "password";
-        t.onChange((v) => (this.passphrase = v));
+        t.inputEl.autocomplete = "off";
+        this.createPassEl = t.inputEl;
       });
+    this.addShowToggle(mk, this.createPassEl as unknown as HTMLInputElement);
     new Setting(el).addButton((b) =>
       b.setButtonText("Create connection code").setCta().onClick(() => this.makeCode())
     );
+    this.inlineEl = el.createDiv({ cls: "dvs-status" });
     this.codeBox = el.createEl("textarea", { cls: "dvs-code", attr: { readonly: "true", rows: "6" } });
     this.codeBox.hide();
     new Setting(el).addButton((b) =>
@@ -340,18 +358,21 @@ export class DriveSyncSettingTab extends PluginSettingTab {
   private async makeCode() {
     const c = this.plugin.data.credentials;
     if (!c) return;
-    if (this.passphrase.length < 12) {
+    const pass = this.createPassEl ? this.createPassEl.value : "";
+    if (pass.length < 12) {
       this.setStatus("The passphrase must be at least 12 characters.");
       return;
     }
     try {
       this.setStatus("Creating the code… this takes a few seconds.");
-      const code = await createConnectionCode(c, this.passphrase);
+      const code = await createConnectionCode(c, pass);
+      // Self-test: prove this code opens with exactly the passphrase typed in the box.
+      await readConnectionCode(code, pass);
       if (this.codeBox) {
         this.codeBox.value = code;
         this.codeBox.show();
       }
-      this.setStatus("Code created. Copy it and keep it somewhere safe, like a password manager.");
+      this.setStatus(`Code created and self-test passed (it opens with the passphrase you typed, ${pass.length} characters). ${describeCode(code)} Copy it and keep it somewhere safe.`);
     } catch (e) {
       this.setStatus(errMsg(e));
     }
